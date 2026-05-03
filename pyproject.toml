@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bias-quantlab"
+version = "0.1.0"
+description = "ETF signal research: shared core + quantlab CLI"
+requires-python = ">=3.10"
+dependencies = [
+  "pandas>=2.0.0",
+  "numpy>=1.24.0",
+  "pydantic>=2.5.0",
+  "plotly>=5.18.0",
+]
+
+[project.optional-dependencies]
+all = ["akshare>=1.12.0", "requests>=2.31.0"]
+
+[project.scripts]
+quantlab = "cli.main:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["core*", "cli*", "quantlab*"]
+exclude = ["app*"]

@@ -22,7 +22,7 @@ from valuation_fetcher import fetch_index_valuation_multi_source
 
 # 默认在 skill 目录下的上一级目录，与 etf_monitor.py 保持一致
 DB_PATH = os.environ.get("ETF_DB_PATH", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "etf_data.db"))
-START_DATE = "20200101"
+START_DATE = "19000101"
 END_DATE = datetime.datetime.now().strftime("%Y%m%d")
 
 # ETF 市场代理篮子配置
@@ -32,7 +32,6 @@ MARKET_PROXY_ETFS = {
     "159845": {"name": "中证1000", "weight": 0.20},
     "159531": {"name": "中证2000", "weight": 0.15},
     "588000": {"name": "科创50", "weight": 0.15},
-    "159941": {"name": "纳指ETF", "weight": 0.0},  # 仅作市场参考，不计入权重
 }
 
 # 目标 ETF 列表
@@ -56,17 +55,16 @@ ETF_LIST = [
     {'code': '515880', 'name': '通信ETF'},
     {'code': '513500', 'name': '513500 ETF'},
     {'code': '159501', 'name': '159501 ETF'},
+    {'code': '159941', 'name': '纳指ETF'},
     {'code': '516290', 'name': '光伏ETF'},
     {'code': '159740', 'name': '恒生科技ETF'},
     {'code': '159566', 'name': '储能电池'},
-    {'code': '159941', 'name': '纳指ETF'},
     {'code': '159307', 'name': '红利低波动100'}
 ]
 
 ETF_INCEPTION_DATE = {
     "159209": "2025-03-12",
     "159361": "2024-11-12",
-    "159941": "2015-07-13",
     "510300": "2012-05-04",
     "510500": "2013-02-06",
     "159845": "2020-04-10",
@@ -84,6 +82,8 @@ ETF_INCEPTION_DATE = {
     "515880": "2019-08-16",
     "513500": "2013-12-05",
     "159501": "2023-05-31",
+    "159941": "2015-07-13",
+    "516290": "2021-09-17",
     "159740": "2021-05-18",
     "159566": "2025-01-27",
     "159307": "2025-01-27",
@@ -582,6 +582,8 @@ def fetch_and_process_data_range(etf_info: Dict, start_date: str, end_date: str)
     all_dfs = []
     start_dt = datetime.datetime.strptime(start_date, "%Y%m%d")
     end_dt = datetime.datetime.strptime(end_date, "%Y%m%d")
+    span_days = int((end_dt - start_dt).days)
+    batch_days = 365 if span_days >= 400 else 90
     
     # 如果已经是最新，不需要更新
     if start_dt >= end_dt:
@@ -591,7 +593,7 @@ def fetch_and_process_data_range(etf_info: Dict, start_date: str, end_date: str)
     current_start = start_dt
     
     while current_start <= end_dt:
-        current_end = min(current_start + datetime.timedelta(days=90), end_dt) 
+        current_end = min(current_start + datetime.timedelta(days=batch_days), end_dt) 
         batch_start_str = current_start.strftime("%Y%m%d")
         batch_end_str = current_end.strftime("%Y%m%d")
         
@@ -1217,11 +1219,12 @@ def update_market_proxy():
         print(f"❌ 市场代理数据更新失败: {e}")
 
 def main():
-    global DB_PATH
+    global DB_PATH, START_DATE
     import argparse
     parser = argparse.ArgumentParser(description="ETF Database Updater")
     parser.add_argument("--full", action="store_true", help="强制全量回填 (忽略现有数据)")
     parser.add_argument("--db-path", default=DB_PATH, help="SQLite 数据库路径")
+    parser.add_argument("--start-date-floor", default=START_DATE, help="全局最早抓取起点 (YYYYMMDD)")
     parser.add_argument(
         "--universe",
         default=None,
@@ -1266,6 +1269,7 @@ def main():
     args = parser.parse_args()
 
     DB_PATH = args.db_path
+    START_DATE = str(getattr(args, "start_date_floor", START_DATE) or START_DATE).replace("-", "").strip()
 
     if args.universe and not os.path.isfile(args.universe):
         print(f"❌ 找不到标的文件: {args.universe}", file=sys.stderr)

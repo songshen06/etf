@@ -1,0 +1,34 @@
+dimensions:
+  drawdown_damage:
+    weight: 0.40
+    max_score: 10.0
+    rules:
+      min_drawdown: -0.15
+      max_drawdown: -0.40
+  chip_structure:
+    weight: 0.35
+    max_score: 10.0
+    rules:
+      bias_ma: 120
+      bias_rate_min: 0.0
+      bias_rate_max: -0.15
+      momentum_min: -0.05
+      momentum_max: 0.05
+  reversal_potential:
+    weight: 0.25
+    max_score: 10.0
+    rules:
+      volume_ratio_min: 1.0
+      volume_ratio_max: 2.0
+      returns_20d_min: -0.05
+      returns_20d_max: 0.05
+  valuation_compression:
+    weight: 0.0
+    max_score: 10.0
+    rules:
+      enabled: false
+  sentiment_extreme:
+    weight: 0.0
+    max_score: 10.0
+    rules:
+      enabled: false
