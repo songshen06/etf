@@ -389,6 +389,86 @@ def cmd_dividend_signal(ns: argparse.Namespace) -> int:
     state_map = load_state(state_path)
     st = state_map.get(code, DividendPositionState())
 
+    if getattr(ns, "use_dividend_valuation", False):
+        import sqlite3
+        from datetime import date
+
+        from quantlab.strategy.dividend_valuation import run_dividend_signal
+
+        def _parse_date(s: str) -> date:
+            s = str(s).strip()
+            if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+                return date.fromisoformat(s[:10])
+            s8 = s.replace("-", "").replace("/", "")[:8]
+            return date(int(s8[0:4]), int(s8[4:6]), int(s8[6:8]))
+
+        as_of = _parse_date(ns.as_of) if getattr(ns, "as_of", None) else _parse_date(_date_from_row(row))
+        current_position = float(ns.current_position) if ns.current_position is not None else float(st.position or 0.0)
+        total_position = float(ns.total_position or 0.0)
+
+        try:
+            with sqlite3.connect(db_path) as conn:
+                dec = run_dividend_signal(
+                    conn=conn,
+                    etf_code=code,
+                    etf_name=None,
+                    index_code=str(ns.index_code),
+                    as_of=as_of,
+                    current_position=current_position,
+                    total_position=total_position,
+                    bias_q=bias_q,
+                    momentum_q=momentum_q,
+                    indicator_name=str(ns.indicator_name),
+                )
+        except Exception as e:
+            print(f"quantlab: error: {e}", file=sys.stderr)
+            return 1
+
+        after = float(max(0.0, min(1.0, current_position + float(dec.suggested_step or 0.0))))
+        out = {
+            "etf_code": dec.etf_code,
+            "index_code": dec.index_code,
+            "date": dec.as_of.isoformat(),
+            "valuation_state": dec.valuation_state,
+            "dividend_yield": dec.dividend_yield,
+            "cn_10y_yield": dec.cn_10y_yield,
+            "dividend_spread": dec.dividend_spread,
+            "bias_q": dec.bias_q,
+            "momentum_q": dec.momentum_q,
+            "strategy_signal": dec.strategy_signal,
+            "max_target_position": dec.max_target_position,
+            "target_position": dec.target_position,
+            "current_position": dec.current_position,
+            "total_position": dec.total_position,
+            "action": dec.action,
+            "suggested_step": dec.suggested_step,
+            "position_after": after,
+            "reason": dec.reason,
+            "details": dec.details,
+        }
+
+        if getattr(ns, "format", "text") == "json":
+            print(json.dumps(out, ensure_ascii=False, indent=2))
+            return 0
+
+        print(f"ETF: {code}")
+        print(f"Valuation State: {dec.valuation_state}")
+        print(f"Dividend Spread: {dec.dividend_spread:.2f}%")
+        print(f"Dividend Yield: {dec.dividend_yield:.2f}%")
+        print(f"CN 10Y Yield: {dec.cn_10y_yield:.2f}%")
+        print(f"BIAS Bucket: {'NA' if dec.bias_q is None else 'Q'+str(dec.bias_q)}")
+        print(f"Momentum Bucket: {'NA' if dec.momentum_q is None else 'Q'+str(dec.momentum_q)}")
+        print(f"Strategy Signal: {dec.strategy_signal}")
+        print(f"Target Position: {dec.target_position:.2f}")
+        print(f"Current Position: {dec.current_position:.2f}")
+        print(f"Action: {dec.action}")
+        if dec.suggested_step and abs(dec.suggested_step) > 1e-12:
+            print(f"Suggested Step: {dec.suggested_step:+.2f}")
+        print("")
+        print("Reason:")
+        print(dec.reason)
+        return 0
+
     snapshot_date = _date_from_row(row)
     if code == "159209":
         signal, action, reason, new_state = decide_dividend_growth_action(
@@ -504,6 +584,17 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--rolling-window", type=int, default=252, help="Rolling window for quantile buckets")
     p.add_argument("--state-path", type=str, default=None, help="State JSON path (default: ~/.quantlab/dividend_state.json)")
     p.add_argument("--dry-run", action="store_true", help="Do not persist state")
+    p.add_argument(
+        "--use-dividend-valuation",
+        action="store_true",
+        help="Use dividend spread valuation module (index dividend_yield - CN10Y) + bias timing + current position",
+    )
+    p.add_argument("--index-code", type=str, default="000922", help="Index code for dividend valuation (default: 000922)")
+    p.add_argument("--as-of", type=str, default=None, help="As-of date for aligning valuation/macro data (default: latest ETF date)")
+    p.add_argument("--indicator-name", type=str, default="CN10Y", help="Macro rate indicator name in macro_rate_daily (default: CN10Y)")
+    p.add_argument("--current-position", type=float, default=None, help="Current position for this ETF (0.0..1.0)")
+    p.add_argument("--total-position", type=float, default=0.0, help="Total portfolio position (0.0..1.0); >0.80 blocks new buys")
+    p.add_argument("--format", choices=["text", "json"], default="text", help="Output format for valuation mode")
     p.set_defaults(_run=cmd_dividend_signal)
 
     ps = subparsers.add_parser("dividend-status", help="Show saved dividend accumulation status")

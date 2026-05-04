@@ -18,7 +18,7 @@ from typing import List, Dict, Optional, Any
 import os
 from data_fetcher import DataFetcher
 from etf_index_mapping import ETF_TO_CSINDEX_INDEX_CODE
-from valuation_fetcher import fetch_index_valuation_multi_source
+from valuation_fetcher import fetch_cn10y_eastmoney_kline, fetch_dividend_index_indicators_multi_source, fetch_index_valuation_multi_source
 
 # 默认在 skill 目录下的上一级目录，与 etf_monitor.py 保持一致
 DB_PATH = os.environ.get("ETF_DB_PATH", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "etf_data.db"))
@@ -401,6 +401,38 @@ def init_db():
                 cursor.execute("ALTER TABLE etf_valuation_daily ADD COLUMN source_index_name TEXT DEFAULT NULL")
             if "raw_payload" not in existing_cols:
                 cursor.execute("ALTER TABLE etf_valuation_daily ADD COLUMN raw_payload TEXT DEFAULT NULL")
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS index_valuation_daily (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_date DATE NOT NULL,
+                    index_code TEXT NOT NULL,
+                    index_name TEXT,
+                    pe1 REAL,
+                    pe2 REAL,
+                    dividend_yield_1 REAL,
+                    dividend_yield_2 REAL,
+                    source TEXT,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(trade_date, index_code)
+                )
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS macro_rate_daily (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_date DATE NOT NULL,
+                    indicator_name TEXT NOT NULL,
+                    indicator_value REAL NOT NULL,
+                    source TEXT,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(trade_date, indicator_name)
+                )
+                """
+            )
             
             conn.commit()
             print(f"✅ 数据库连接/初始化成功: {DB_PATH}")
@@ -536,6 +568,108 @@ def update_etf_valuation(etf_list: List[Dict[str, Any]], *, valuation_mode: str 
         f"failed_fetch={failed_fetch} failed_parse={failed_parse} "
         f"inserted_rows={inserted_rows} updated_rows={updated_rows} source_used={source_used_counts} "
         f"per_etf_rows={per_etf_row_count}",
+        file=sys.stderr,
+    )
+
+
+def update_dividend_valuation_sources(
+    *,
+    index_codes: List[str],
+    cn10y_secid: str = "171.CN10Y",
+    indicator_name: str = "CN10Y",
+) -> None:
+    idx_codes = [str(x).strip() for x in (index_codes or []) if str(x).strip()]
+    if not idx_codes:
+        idx_codes = ["000922"]
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+
+        total_idx = 0
+        ok_idx = 0
+        idx_rows_written = 0
+        for code in idx_codes:
+            total_idx += 1
+            df, source_used, note = fetch_dividend_index_indicators_multi_source(index_code=code)
+            if df is None or getattr(df, "empty", True):
+                print(f"⚠️  红利指数估值为空: index={code} source={source_used} note={note}", file=sys.stderr)
+                continue
+
+            rows = []
+            for _, r in df.iterrows():
+                td_raw = r.get("trade_date")
+                if td_raw is None:
+                    continue
+                td = parse_trade_date(td_raw).isoformat()
+                rows.append(
+                    (
+                        td,
+                        str(r.get("index_code") or code),
+                        r.get("index_name", None),
+                        r.get("pe1", None),
+                        r.get("pe2", None),
+                        r.get("dividend_yield_1", None),
+                        r.get("dividend_yield_2", None),
+                        str(r.get("source") or source_used),
+                    )
+                )
+            if not rows:
+                print(f"⚠️  红利指数估值无有效行: index={code} source={source_used}", file=sys.stderr)
+                continue
+
+            cursor.executemany(
+                """
+                INSERT INTO index_valuation_daily(
+                    trade_date, index_code, index_name, pe1, pe2, dividend_yield_1, dividend_yield_2, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(trade_date, index_code) DO UPDATE SET
+                    index_name=excluded.index_name,
+                    pe1=excluded.pe1,
+                    pe2=excluded.pe2,
+                    dividend_yield_1=excluded.dividend_yield_1,
+                    dividend_yield_2=excluded.dividend_yield_2,
+                    source=excluded.source,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                rows,
+            )
+            conn.commit()
+            ok_idx += 1
+            idx_rows_written += int(len(rows))
+            print(f"✅  红利指数估值写入成功: index={code} rows={len(rows)} source={source_used}")
+
+        df_rate = fetch_cn10y_eastmoney_kline(secid=cn10y_secid)
+        rate_rows_written = 0
+        if df_rate is None or getattr(df_rate, "empty", True):
+            print(f"⚠️  CN10Y 拉取为空: secid={cn10y_secid}", file=sys.stderr)
+        else:
+            rows = []
+            for _, r in df_rate.iterrows():
+                td_raw = r.get("trade_date")
+                v = r.get("indicator_value")
+                if td_raw is None or v is None:
+                    continue
+                td = parse_trade_date(td_raw).isoformat()
+                rows.append((td, str(indicator_name), float(v), str(r.get("source") or "eastmoney_push2his")))
+            if rows:
+                cursor.executemany(
+                    """
+                    INSERT INTO macro_rate_daily(trade_date, indicator_name, indicator_value, source)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(trade_date, indicator_name) DO UPDATE SET
+                        indicator_value=excluded.indicator_value,
+                        source=excluded.source,
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    rows,
+                )
+                conn.commit()
+                rate_rows_written = int(len(rows))
+                print(f"✅  CN10Y 写入成功: rows={rate_rows_written} source=eastmoney_push2his")
+
+    print(
+        f"🏷️  红利估值源更新完成: index_total={total_idx} index_ok={ok_idx} index_rows={idx_rows_written} "
+        f"cn10y_rows={rate_rows_written}",
         file=sys.stderr,
     )
 
@@ -1266,6 +1400,28 @@ def main():
         default="standard",
         help="估值更新模式：standard=仅主源；deep=预留多源/更深历史结构（当前回退到主源）",
     )
+    parser.add_argument(
+        "--update-dividend-valuation",
+        action="store_true",
+        help="可选：更新红利估值锚数据（index_valuation_daily + macro_rate_daily：中证指数 indicator xls + EastMoney CN10Y）",
+    )
+    parser.add_argument(
+        "--dividend-index-codes",
+        type=str,
+        default="000922",
+        help="红利估值锚：指数代码列表，逗号分隔（默认：000922）",
+    )
+    parser.add_argument(
+        "--cn10y-secid",
+        type=str,
+        default="171.CN10Y",
+        help="EastMoney secid for CN10Y kline (default: 171.CN10Y)",
+    )
+    parser.add_argument(
+        "--only-dividend-valuation",
+        action="store_true",
+        help="只更新红利估值锚数据（index_valuation_daily + macro_rate_daily），不更新 ETF 行情/市场指标/市场代理",
+    )
     args = parser.parse_args()
 
     DB_PATH = args.db_path
@@ -1286,6 +1442,17 @@ def main():
     print("-" * 50)
 
     init_db()
+
+    if getattr(args, "only_dividend_valuation", False):
+        idx_codes = [x.strip() for x in str(getattr(args, "dividend_index_codes", "")).split(",") if x.strip()]
+        update_dividend_valuation_sources(
+            index_codes=idx_codes,
+            cn10y_secid=str(getattr(args, "cn10y_secid", "171.CN10Y")),
+            indicator_name="CN10Y",
+        )
+        print("-" * 50)
+        print("🏁 红利估值锚更新完成!")
+        sys.exit(0)
 
     with sqlite3.connect(DB_PATH) as conn:
         statuses = {etf["code"]: check_etf_data_status(conn, etf["code"], etf["name"]) for etf in etf_list}
@@ -1342,6 +1509,16 @@ def main():
         print("-" * 50)
         print("🏷️  开始更新 ETF 估值数据（etf_valuation_daily）")
         update_etf_valuation(etf_list, valuation_mode=str(getattr(args, "valuation_mode", "standard")))
+
+    if getattr(args, "update_dividend_valuation", False):
+        print("-" * 50)
+        print("🏷️  开始更新红利估值锚数据（index_valuation_daily + macro_rate_daily）")
+        idx_codes = [x.strip() for x in str(getattr(args, "dividend_index_codes", "")).split(",") if x.strip()]
+        update_dividend_valuation_sources(
+            index_codes=idx_codes,
+            cn10y_secid=str(getattr(args, "cn10y_secid", "171.CN10Y")),
+            indicator_name="CN10Y",
+        )
     
     print("-" * 50)
     print("🏁 数据库更新任务完成!")

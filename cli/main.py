@@ -1351,6 +1351,7 @@ def build_parser() -> argparse.ArgumentParser:
     from quantlab.cli.rank_bloody_chip import add_parser as add_rank_bloody_chip_parser
     from quantlab.cli.explain_bloody_chip import add_parser as add_explain_bloody_chip_parser
     from quantlab.cli.dividend_signal import add_parser as add_dividend_signal_parser
+    from quantlab.cli.dividend_valuation import add_parser as add_dividend_valuation_parser
     from quantlab.cli.recommend_strategy import add_parser as add_recommend_parser
     from quantlab.cli.backtest_strategy_report import add_parser as add_backtest_strategy_report_parser
     from quantlab.cli.debug_trades import add_parser as add_debug_trades_parser
@@ -1361,6 +1362,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_rank_bloody_chip_parser(sub)
     add_explain_bloody_chip_parser(sub)
     add_dividend_signal_parser(sub)
+    add_dividend_valuation_parser(sub)
     add_recommend_parser(sub)
     add_backtest_strategy_report_parser(sub)
     add_debug_trades_parser(sub)

@@ -11,7 +11,8 @@ DIVIDEND = ["159209", "515080"]
 CORE_INDEX = ["510300", "510500", "159361"]
 SECTOR_ROTATION = ["510150", "159992", "510410", "515880"]
 HIGH_BETA = ["513050", "512880", "588000", "159531", "159740"]
-THEMATIC = ["562060", "513500", "159501"]
+US_INDEX = ["159941", "159501", "513500"]
+THEMATIC = ["562060"]
 DEFENSIVE = ["511130", "518880"]
 
 MIN_EXPOSURE = {
@@ -30,6 +31,8 @@ def classify_etf(code: str) -> str:
         return "SECTOR_ROTATION"
     if c in HIGH_BETA:
         return "HIGH_BETA"
+    if c in US_INDEX:
+        return "US_INDEX"
     if c in THEMATIC:
         return "THEMATIC"
     if c in DEFENSIVE:
@@ -603,6 +606,7 @@ def core_index_staged_base_decision(
     momentum_q: int | None,
     base_target: float,
     overlay_max: float,
+    category: str = "CORE_INDEX",
 ) -> dict[str, Any] | None:
     pos = float(current_position)
     pos = 0.0 if pos < 1e-9 else pos
@@ -619,7 +623,7 @@ def core_index_staged_base_decision(
             if low_zone and rebound_hint:
                 return _ensure_keys(
                     {
-                        "category": "CORE_INDEX",
+                        "category": category,
                         "strategy": "STAGED_BASE_ENTRY",
                         "signal": "PROBE",
                         "action": f"BUY {int(probe_target*100)}%",
@@ -638,7 +642,7 @@ def core_index_staged_base_decision(
                 )
             return _ensure_keys(
                 {
-                    "category": "CORE_INDEX",
+                    "category": category,
                     "strategy": "STAGED_BASE_ENTRY",
                     "signal": "HOLD_CASH",
                     "action": "HOLD",
@@ -659,7 +663,7 @@ def core_index_staged_base_decision(
             if bias_q is not None and bias_q >= 4:
                 return _ensure_keys(
                     {
-                        "category": "CORE_INDEX",
+                        "category": category,
                         "strategy": "STAGED_BASE_ENTRY",
                         "signal": "HOLD_CASH",
                         "action": "HOLD",
@@ -674,7 +678,7 @@ def core_index_staged_base_decision(
                 )
             return _ensure_keys(
                 {
-                    "category": "CORE_INDEX",
+                    "category": category,
                     "strategy": "STAGED_BASE_ENTRY",
                     "signal": "BUILD_BASE",
                     "action": f"BUY to {int(base_target*100)}%",
@@ -697,7 +701,7 @@ def core_index_staged_base_decision(
         if st in ("RANGE", "TREND"):
             return _ensure_keys(
                 {
-                    "category": "CORE_INDEX",
+                    "category": category,
                     "strategy": "STAGED_BASE_ENTRY",
                     "signal": "BUILD_BASE",
                     "action": f"BUY to {int(base_target*100)}%",
@@ -715,7 +719,7 @@ def core_index_staged_base_decision(
             )
         return _ensure_keys(
             {
-                "category": "CORE_INDEX",
+                "category": category,
                 "strategy": "STAGED_BASE_ENTRY",
                 "signal": "HOLD",
                 "action": "HOLD",
@@ -733,7 +737,7 @@ def core_index_staged_base_decision(
         if st == "DOWN":
             return _ensure_keys(
                 {
-                    "category": "CORE_INDEX",
+                    "category": category,
                     "strategy": "STAGED_BASE_ENTRY",
                     "signal": "REDUCE_TO_BASE",
                     "action": "HOLD",
@@ -751,7 +755,7 @@ def core_index_staged_base_decision(
             if entry_ok:
                 return _ensure_keys(
                     {
-                        "category": "CORE_INDEX",
+                        "category": category,
                         "strategy": "STAGED_BASE_ENTRY",
                         "signal": "ADD_OVERLAY",
                         "action": f"BUY to {int(full_target*100)}%",
@@ -766,7 +770,7 @@ def core_index_staged_base_decision(
                 )
         return _ensure_keys(
             {
-                "category": "CORE_INDEX",
+                "category": category,
                 "strategy": "STAGED_BASE_ENTRY",
                 "signal": "HOLD",
                 "action": "HOLD",
@@ -814,6 +818,7 @@ def cmd_recommend(ns: argparse.Namespace) -> int:
         "CORE_INDEX": "trend_following_strategy",
         "SECTOR_ROTATION": "mean_reversion_strategy",
         "HIGH_BETA": "bloody_chip_strategy",
+        "US_INDEX": "trend_following_strategy",
         "THEMATIC": "light_trading_strategy",
         "DEFENSIVE": "hold_only_strategy",
     }[category]
@@ -851,14 +856,14 @@ def cmd_recommend(ns: argparse.Namespace) -> int:
     momentum_q = rolling_bucket_rank(df[mom_col], window=int(ns.rolling_window), n_buckets=5)
 
     current_position = float(getattr(ns, "current_position", 0.0) or 0.0)
-    if category == "DIVIDEND":
+    if category == "DIVIDEND" and (not getattr(ns, "use_dividend_valuation", False)):
         state_path = Path(getattr(ns, "state_path", None) or DEFAULT_STATE_PATH)
         st_map = load_state(state_path)
         st = st_map.get(code, DividendPositionState())
         current_position = float(st.position or 0.0)
 
     market_state = None
-    if category == "CORE_INDEX":
+    if category in ("CORE_INDEX", "US_INDEX"):
         from quantlab.cli.market_regime import rolling_bucket_rank_series, detect_market_state
 
         tmp = df.copy()
@@ -877,7 +882,68 @@ def cmd_recommend(ns: argparse.Namespace) -> int:
     div_growth_base_used = None
     div_growth_overlay_used = None
     if category == "DIVIDEND":
-        if code == "159209":
+        if getattr(ns, "use_dividend_valuation", False):
+            import sqlite3
+            from datetime import date
+
+            from quantlab.strategy.dividend_valuation import run_dividend_signal
+
+            def _parse_date(s: str) -> date:
+                s = str(s).strip()
+                if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+                    return date.fromisoformat(s[:10])
+                s8 = s.replace("-", "").replace("/", "")[:8]
+                return date(int(s8[0:4]), int(s8[4:6]), int(s8[6:8]))
+
+            as_of = _parse_date(ns.as_of) if getattr(ns, "as_of", None) else _parse_date(_date_from_row(row))
+            total_position = float(getattr(ns, "total_position", 0.0) or 0.0)
+            try:
+                with sqlite3.connect(db_path) as conn:
+                    dec = run_dividend_signal(
+                        conn=conn,
+                        etf_code=code,
+                        etf_name=name,
+                        index_code=str(getattr(ns, "index_code", "000922")),
+                        as_of=as_of,
+                        current_position=float(current_position),
+                        total_position=total_position,
+                        bias_q=bias_q,
+                        momentum_q=momentum_q,
+                        indicator_name=str(getattr(ns, "indicator_name", "CN10Y")),
+                    )
+            except Exception as e:
+                print(f"quantlab: error: {e}", file=sys.stderr)
+                return 1
+
+            after = float(max(0.0, min(1.0, float(current_position) + float(dec.suggested_step or 0.0))))
+            strategy_name = "dividend_valuation"
+            res = _ensure_keys(
+                {
+                    "category": "DIVIDEND",
+                    "strategy": "DIVIDEND_VALUATION",
+                    "signal": dec.strategy_signal,
+                    "action": dec.action,
+                    "position_after": after,
+                    "position_max": float(dec.max_target_position),
+                    "exit_plan": [
+                        "valuation_state EXPENSIVE -> cap 20% and allow trims only",
+                        "single step cap: +/-10%",
+                        "total_position>80% blocks new buys",
+                    ],
+                    "reason": dec.reason,
+                    "valuation_state": dec.valuation_state,
+                    "dividend_yield": dec.dividend_yield,
+                    "cn_10y_yield": dec.cn_10y_yield,
+                    "dividend_spread": dec.dividend_spread,
+                    "target_position": dec.target_position,
+                    "current_position": dec.current_position,
+                    "total_position": dec.total_position,
+                    "suggested_step": dec.suggested_step,
+                    "index_code": dec.index_code,
+                    "details": dec.details,
+                }
+            )
+        elif code == "159209":
             bt = getattr(ns, "base_target", None)
             base_t = float(bt) if bt is not None else None
             if base_t is not None and (not (0.3 <= base_t <= 0.9)):
@@ -896,7 +962,7 @@ def cmd_recommend(ns: argparse.Namespace) -> int:
         else:
             strategy_name = "dividend_strategy"
             res = dividend_strategy(bias_q=bias_q, momentum_q=momentum_q, current_position=current_position)
-    elif category == "CORE_INDEX":
+    elif category in ("CORE_INDEX", "US_INDEX"):
         staged = core_index_staged_base_decision(
             current_position=current_position,
             market_state=market_state,
@@ -904,6 +970,7 @@ def cmd_recommend(ns: argparse.Namespace) -> int:
             momentum_q=momentum_q,
             base_target=base_target,
             overlay_max=overlay_max,
+            category=category,
         )
         if staged is not None:
             strategy_name = "staged_base_entry"
@@ -945,7 +1012,7 @@ def cmd_recommend(ns: argparse.Namespace) -> int:
     else:
         res = hold_only_strategy(current_position=current_position)
 
-    if ns.json:
+    if bool(getattr(ns, "json", False)) or (getattr(ns, "format", None) == "json"):
         print(json.dumps(res, ensure_ascii=False, indent=2))
         return 0
 
@@ -961,9 +1028,9 @@ def cmd_recommend(ns: argparse.Namespace) -> int:
     print(f"  {_h('bias', '乖离')}: {float(bias) * 100.0:.1f}%")
     print((f"  {_h('bias_q', '乖离分位')}: Q{bias_q}") if bias_q is not None else f"  {_h('bias_q', '乖离分位')}: NA")
     print((f"  {_h('momentum_q', '动量分位')}: Q{momentum_q}") if momentum_q is not None else f"  {_h('momentum_q', '动量分位')}: NA")
-    if category == "CORE_INDEX" and market_state is not None:
+    if category in ("CORE_INDEX", "US_INDEX") and market_state is not None:
         print(f"  {_h('market_state', '市场状态')}: {market_state}")
-    if category == "CORE_INDEX":
+    if category in ("CORE_INDEX", "US_INDEX"):
         print("")
         print(_h("config", "配置") + ":")
         print(f"  {_h('base_target', '底仓目标')}: {int(base_target*100)}%")
@@ -988,13 +1055,16 @@ def cmd_recommend(ns: argparse.Namespace) -> int:
     print(f"  {_h('current', '当前')}: {current_position * 100:.0f}%")
     print(f"  {_h('after_trade', '交易后')}: {res['position_after'] * 100:.0f}%")
     if category == "DIVIDEND":
-        if code == "159209":
+        if (not getattr(ns, "use_dividend_valuation", False)) and code == "159209":
             bt = 0.60 if div_growth_base_used is None else float(div_growth_base_used)
             om = max(0.0, 1.0 - bt) if div_growth_overlay_used is None else float(div_growth_overlay_used)
             print(f"  {_h('target', '目标')}: base {int(bt*100)}% + overlay {int(om*100)}% (cap {int((bt+om)*100)}%)")
-        else:
+        elif not getattr(ns, "use_dividend_valuation", False):
             print(f"  {_h('target', '目标')}: base 70% (low-zone add to 85%/100%; trim to base only at Q5)")
-    elif category == "CORE_INDEX":
+        else:
+            print(f"  {_h('target', '目标')}: max_target {int(float(res.get('position_max', 0.0))*100)}% (from valuation_state={res.get('valuation_state')})")
+            print(f"  {_h('target_position', '目标仓位')}: {float(res.get('target_position', 0.0))*100:.0f}% (suggested_step={float(res.get('suggested_step', 0.0))*100:+.0f}%)")
+    elif category in ("CORE_INDEX", "US_INDEX"):
         if res.get("target_label"):
             print(f"  {_h('target', '目标')}: {res.get('target_label')}")
         else:
@@ -1002,7 +1072,7 @@ def cmd_recommend(ns: argparse.Namespace) -> int:
     else:
         print(f"  {_h('max', '上限')}: {res['position_max'] * 100:.0f}%")
     print("")
-    if category in ("DIVIDEND", "CORE_INDEX"):
+    if category in ("DIVIDEND", "CORE_INDEX", "US_INDEX"):
         print(_h("constraint", "约束") + ":")
         if category == "DIVIDEND":
             if code == "159209":
@@ -1018,11 +1088,13 @@ def cmd_recommend(ns: argparse.Namespace) -> int:
                 print("  build base only in low zone (bias_q in Q1/Q2 and momentum_q in Q1/Q2)")
                 print("  add only in deep low (bias_q==Q1 and momentum_q in Q1/Q2)")
                 print("  trim only at extreme rich (bias_q==Q5) back to base; no normal full exit")
-        if category == "CORE_INDEX":
+        if category in ("CORE_INDEX", "US_INDEX"):
             if res.get("constraint_notes"):
                 print(f"  {res.get('constraint_notes')}")
             print("  base = long-term core holding; overlay = tactical layer on top of base")
             print("  min holding days = 15 (blocks frequent trades unless momentum exit)")
+            if category == "US_INDEX":
+                print("  US_INDEX: expect overnight gap risk (US session); avoid chasing at bias_q>=4")
         print("")
     print(_h("exit_plan", "退出计划") + ":")
     for rule in res["exit_plan"]:
@@ -1030,7 +1102,7 @@ def cmd_recommend(ns: argparse.Namespace) -> int:
     print("")
     print(_h("reason", "原因") + ":")
     print(f"  {res['reason']}")
-    if category == "CORE_INDEX" and res.get("suggestion"):
+    if category in ("CORE_INDEX", "US_INDEX") and res.get("suggestion"):
         print("")
         print(_h("suggestion", "建议") + ":")
         print(f"  {res.get('suggestion')}")
@@ -1039,7 +1111,7 @@ def cmd_recommend(ns: argparse.Namespace) -> int:
     print(_h("summary", "摘要") + ":")
     print(f"  {_h('recommended_action', '建议动作')}: {res['action']}")
     print(f"  {_h('position_after', '交易后仓位')}: {res['position_after'] * 100:.0f}%")
-    if category == "CORE_INDEX" and market_state is not None:
+    if category in ("CORE_INDEX", "US_INDEX") and market_state is not None:
         print(f"  {_h('market_state', '市场状态')}: {market_state}")
     if bias_q is not None and momentum_q is not None:
         print(f"  {_h('context', '关键信号')}: bias_q=Q{bias_q}, momentum_q=Q{momentum_q}")
@@ -1061,9 +1133,19 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
         "--base-target",
         type=float,
         default=None,
-        help="target base position for CORE_INDEX (0.0~1.0; default 0.7 if not specified)",
+        help="target base position for CORE_INDEX / US_INDEX (0.0~1.0; default 0.7 if not specified)",
     )
     p.add_argument("--current-position", type=float, default=0.0, help="Your current position (0.0..1.0)")
+    p.add_argument(
+        "--use-dividend-valuation",
+        action="store_true",
+        help="Dividend-only: enable dividend spread valuation module (index dividend_yield - CN10Y). Default keeps legacy dividend logic.",
+    )
+    p.add_argument("--index-code", type=str, default="000922", help="Dividend valuation index code (default: 000922)")
+    p.add_argument("--as-of", type=str, default=None, help="Dividend valuation as-of date (default: latest ETF date)")
+    p.add_argument("--indicator-name", type=str, default="CN10Y", help="Macro rate indicator name in macro_rate_daily (default: CN10Y)")
+    p.add_argument("--total-position", type=float, default=0.0, help="Total portfolio position (0.0..1.0); >0.80 blocks new buys")
     p.add_argument("--json", action="store_true", help="Output JSON")
+    p.add_argument("--format", choices=["text", "json"], default="text", help="Output format (json implies --json)")
     p.add_argument("--state-path", type=str, default=None, help="Dividend state json (optional override)")
     p.set_defaults(_run=cmd_recommend)
